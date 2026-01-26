@@ -1,97 +1,32 @@
 const express = require("express");
 const cors = require("cors");
-const http = require("http");
-const { Server } = require("socket.io");
-const { PrismaClient } = require("@prisma/client");
+const morgan = require("morgan");
+
+const { testConnection } = require("./db");
+
+const authRoutes = require("./routes/auth");
+const emergencyRoutes = require("./routes/emergency");
+const dispatchRoutes = require("./routes/dispatch");
 
 const app = express();
-const server = http.createServer(app);
-
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
-});
-
-const prisma = new PrismaClient();
-
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(morgan("dev"));
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date() });
-});
+app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
 
-// --------------------
-// EMERGENCIES
-// --------------------
+app.use("/auth", authRoutes);
+app.use("/emergencies", emergencyRoutes);
+app.use("/dispatch", dispatchRoutes);
 
-// List emergencies
-app.get("/emergencies", async (req, res) => {
+const PORT = process.env.PORT || 5050;
+
+(async () => {
   try {
-    const requests = await prisma.emergencyRequest.findMany();
-    res.json(requests);
+    await testConnection();
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch emergencies" });
+    console.error("Failed to start server:", err);
+    process.exit(1);
   }
-});
-
-// Create new emergency
-app.post("/emergencies", async (req, res) => {
-  try {
-    const { type, location } = req.body;
-    if (!type || !location) {
-      return res.status(400).json({ error: "type and location are required" });
-    }
-
-    const newRequest = await prisma.emergencyRequest.create({
-      data: { type, location },
-    });
-
-    // Emit to all connected clients
-    io.emit("new_emergency", newRequest);
-
-    res.status(201).json(newRequest);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to create emergency" });
-  }
-});
-
-// --------------------
-// RESPONDERS
-// --------------------
-
-// List all responders
-app.get("/responders", async (req, res) => {
-  try {
-    const responders = await prisma.responders.findMany(); // note lowercase
-    res.json(responders);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch responders" });
-  }
-});
-
-// --------------------
-// SOCKET.IO
-// --------------------
-
-io.on("connection", (socket) => {
-  console.log("New client connected:", socket.id);
-  socket.emit("welcome", "Connected to RescueRoute server!");
-
-  // Optionally: listen for responder updates in the future
-  // socket.on("responder_update", async (data) => { ... });
-});
-
-// --------------------
-// START SERVER
-// --------------------
-
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+})();
