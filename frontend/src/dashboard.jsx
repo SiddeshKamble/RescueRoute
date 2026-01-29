@@ -5,6 +5,56 @@ import { getResponderIcon } from "./icons";
 
 const API_BASE = "http://localhost:5050";
 
+const STATUS_ORDER = ["PENDING", "ASSIGNED", "EN_ROUTE", "ON_SCENE", "COMPLETED"];
+const FINAL_STATUSES = ["COMPLETED", "CANCELLED"];
+const ACTIVE_STATUSES = ["PENDING", "ASSIGNED", "EN_ROUTE", "ON_SCENE"];
+
+const SAFETY = {
+  AMBULANCE: {
+    title: "Medical Emergency - While help is coming",
+    numbers: [
+      { label: "Emergency", value: "911" },
+      { label: "Poison Control (US)", value: "1-800-222-1222" }
+    ],
+    do: [
+      "Check if the person is responsive and breathing.",
+      "If not breathing and you know CPR, begin CPR.",
+      "If bleeding, apply firm pressure with a clean cloth.",
+      "Keep the person warm and still (avoid moving if neck/back injury suspected).",
+      "Gather meds/allergies and medical history if possible."
+    ],
+    dont: [
+      "Don’t give food or drink to an unconscious person.",
+      "Don’t move someone with suspected spinal injury unless in immediate danger."
+    ]
+  },
+  FIRE: {
+    title: "Fire Emergency - While help is coming",
+    numbers: [{ label: "Emergency", value: "911" }],
+    do: [
+      "Leave the building immediately if there is smoke/fire.",
+      "If safe, close doors behind you to slow fire spread.",
+      "Stay low if there is smoke.",
+      "Move to a safe meeting point outside."
+    ],
+    dont: [
+      "Don’t use elevators.",
+      "Don’t re-enter the building for belongings.",
+      "Don’t fight large fires, wait for firefighters."
+    ]
+  },
+  POLICE: {
+    title: "Police Emergency - While help is coming",
+    numbers: [{ label: "Emergency", value: "911" }],
+    do: [
+      "Move to a safe location if possible.",
+      "If it’s safe, note details: clothing, direction of travel, vehicle plate.",
+      "Keep your phone available and follow dispatcher instructions."
+    ],
+    dont: ["Don’t confront the suspect.", "Don’t follow someone who may be dangerous."]
+  }
+};
+
 function geojsonToLatLngs(routeGeojson) {
   const coords = routeGeojson?.coordinates || [];
   return coords.map(([lng, lat]) => [lat, lng]);
@@ -17,6 +67,104 @@ function FitBounds({ latlngs }) {
     map.fitBounds(latlngs, { padding: [40, 40] });
   }, [latlngs, map]);
   return null;
+}
+
+function StatusBadge({ status }) {
+  const style = { ...ui.badge };
+  if (status === "PENDING") style.background = "rgba(255,165,0,0.12)";
+  if (status === "ASSIGNED" || status === "EN_ROUTE") style.background = "rgba(0,128,255,0.12)";
+  if (status === "ON_SCENE") style.background = "rgba(0,0,0,0.06)";
+  if (status === "COMPLETED") style.background = "rgba(0,200,0,0.12)";
+  if (status === "CANCELLED") style.background = "rgba(255,0,0,0.10)";
+  return <span style={style}>{status}</span>;
+}
+
+function StatusTracker({ status }) {
+  const idx = STATUS_ORDER.indexOf(status);
+  const cancelled = status === "CANCELLED";
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={ui.sectionTitle}>Status tracker</div>
+      <div style={ui.trackerRow}>
+        {STATUS_ORDER.map((s, i) => {
+          const active = !cancelled && i <= idx;
+          return (
+            <div key={s} style={ui.trackerItem}>
+              <div
+                style={{
+                  ...ui.dot,
+                  opacity: cancelled ? 0.4 : 1,
+                  background: active ? "black" : "rgba(0,0,0,0.15)"
+                }}
+              />
+              <div style={{ fontSize: 11, opacity: active ? 0.9 : 0.55 }}>{s}</div>
+              {i !== STATUS_ORDER.length - 1 && (
+                <div
+                  style={{
+                    ...ui.line,
+                    opacity: cancelled ? 0.3 : 1,
+                    background: active ? "black" : "rgba(0,0,0,0.15)"
+                  }}
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {cancelled && (
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
+          This request was cancelled.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SafetyPanel({ type }) {
+  const info = SAFETY[type] || SAFETY.POLICE;
+
+  return (
+    <div style={ui.panel}>
+      <div style={ui.panelTitle}>While you wait</div>
+      <div style={ui.panelSub}>{info.title}</div>
+
+      <div style={{ marginTop: 10 }}>
+        <div style={ui.sectionTitle}>Emergency numbers</div>
+        {info.numbers.map((n) => (
+          <div key={n.value} style={ui.row}>
+            <span style={{ opacity: 0.85 }}>{n.label}</span>
+            <a href={`tel:${n.value}`} style={ui.phoneLink}>{n.value}</a>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <div style={ui.sectionTitle}>Do</div>
+        <ul style={ui.list}>
+          {info.do.map((x, i) => <li key={i}>{x}</li>)}
+        </ul>
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <div style={ui.sectionTitle}>Avoid</div>
+        <ul style={ui.list}>
+          {info.dont.map((x, i) => <li key={i}>{x}</li>)}
+        </ul>
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <div style={ui.sectionTitle}>Share with responders</div>
+        <ul style={ui.list}>
+          <li>Exact location / nearest landmark</li>
+          <li>Number of people involved</li>
+          <li>Any hazards (fire, weapons, gas leak, traffic)</li>
+          <li>Best entry point / access instructions</li>
+        </ul>
+      </div>
+    </div>
+  );
 }
 
 export default function Dashboard({ token, user, onLogout }) {
@@ -111,7 +259,6 @@ export default function Dashboard({ token, user, onLogout }) {
 
       setMsg("✅ Emergency created");
       await loadMine();
-      setSelectedEmergency(null);
     } catch (err) {
       setMsg("❌ Address not found. Try a more complete address.");
     } finally {
@@ -119,10 +266,9 @@ export default function Dashboard({ token, user, onLogout }) {
     }
   }
 
-  // ✅ Citizen cancels emergency
-  async function cancelEmergency(id) {
+  async function cancelEmergency(emergencyId) {
     setMsg("");
-    const res = await fetch(`${API_BASE}/emergencies/${id}/cancel`, {
+    const res = await fetch(`${API_BASE}/emergencies/${emergencyId}/cancel`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}` }
     });
@@ -131,29 +277,29 @@ export default function Dashboard({ token, user, onLogout }) {
       setMsg(data?.message || "Cancel failed");
       return;
     }
-    setMsg("✅ Request cancelled");
+    setMsg("✅ Emergency cancelled");
     await loadMine();
-    setSelectedEmergency(data.emergency);
+    setSelectedEmergency(null);
   }
 
-  // ✅ Responder updates status
-  async function updateStatus(id, status) {
-    const res = await fetch(`${API_BASE}/emergencies/${id}/status`, {
+  async function updateEmergencyStatus(emergencyId, newStatus) {
+    setMsg("");
+    const res = await fetch(`${API_BASE}/emergencies/${emergencyId}/status`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`
       },
-      body: JSON.stringify({ status })
+      body: JSON.stringify({ status: newStatus })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      alert(data?.message || "Status update failed");
+      setMsg(data?.message || "Status update failed");
       return;
     }
+    setMsg(`✅ Status updated to ${newStatus}`);
     await loadAssigned();
     await loadStationsAndDispatch();
-    setSelectedEmergency(data.emergency);
   }
 
   const routeLatLngs = useMemo(() => {
@@ -191,184 +337,236 @@ export default function Dashboard({ token, user, onLogout }) {
     return `ETA: ${mins} min • ${km} km`;
   }
 
-  const canCitizenCancel =
-    isCitizen &&
-    selectedEmergency &&
-    ["PENDING", "ASSIGNED"].includes(selectedEmergency.status);
-
-  const canResponderUpdate =
-    isResponder &&
-    selectedEmergency &&
-    ["ASSIGNED", "EN_ROUTE", "ON_SCENE"].includes(selectedEmergency.status);
+  function canCancel(e) {
+    return isCitizen && e && e.created_by === user.id && ACTIVE_STATUSES.includes(e.status);
+  }
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "400px 1fr", height: "100vh" }}>
+    <div style={{ display: "grid", gridTemplateColumns: "420px 1fr", height: "100vh" }}>
       {/* Sidebar */}
-      <div style={{ padding: 16, borderRight: "1px solid #333", overflow: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div style={{ padding: 16, borderRight: "1px solid rgba(0,0,0,0.12)", overflow: "auto" }}>
+        <div style={ui.headerRow}>
           <div>
             <h2 style={{ margin: 0 }}>RescueRoute</h2>
-            <div style={{ fontSize: 13, opacity: 0.8 }}>
+            <div style={{ fontSize: 13, opacity: 0.75 }}>
               {user.userType} {user.responderRole ? `(${user.responderRole})` : ""}
             </div>
           </div>
-          <button onClick={onLogout}>Logout</button>
+          <button style={ui.btnOutline} onClick={onLogout}>Logout</button>
         </div>
 
-        {msg && <div style={{ marginTop: 10 }}>{msg}</div>}
+        {msg && <div style={ui.toast}>{msg}</div>}
 
-        {/* Mode toggle */}
+        {/* Responder toggle */}
         {isResponder && (
-          <div style={{ marginTop: 12 }}>
-            <b>View:</b>{" "}
-            <button onClick={() => { setMode("RESPONDER"); setSelectedEmergency(null); }}>
-              Station
-            </button>
-            <button onClick={() => { setMode("DISPATCH"); setSelectedEmergency(null); }} style={{ marginLeft: 8 }}>
-              Dispatch
-            </button>
-          </div>
+          <>
+            <div style={ui.card}>
+              <div style={ui.sectionTitle}>View</div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button
+                  style={mode === "RESPONDER" ? ui.btnPrimary : ui.btnOutline}
+                  onClick={() => { setMode("RESPONDER"); setSelectedEmergency(null); }}
+                >
+                  Station
+                </button>
+                <button
+                  style={mode === "DISPATCH" ? ui.btnPrimary : ui.btnOutline}
+                  onClick={() => { setMode("DISPATCH"); setSelectedEmergency(null); }}
+                >
+                  Dispatch
+                </button>
+              </div>
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+                🔴 FIRE • 🟢 AMBULANCE • 🔵 POLICE
+              </div>
+            </div>
+          </>
         )}
 
         {/* Citizen create */}
         {isCitizen && (
-          <>
-            <h3 style={{ marginTop: 16 }}>Create Emergency (Address)</h3>
+          <div style={ui.card}>
+            <div style={ui.sectionTitle}>Create Emergency (Address)</div>
 
-            <label>Type</label><br />
-            <select value={type} onChange={(e) => setType(e.target.value)}>
+            <label style={ui.label}>Type</label>
+            <select style={ui.input} value={type} onChange={(e) => setType(e.target.value)}>
               <option value="AMBULANCE">AMBULANCE</option>
               <option value="FIRE">FIRE</option>
               <option value="POLICE">POLICE</option>
             </select>
 
-            <div style={{ height: 8 }} />
-            <label>Description</label><br />
-            <input value={desc} onChange={(e) => setDesc(e.target.value)} style={{ width: "100%" }} />
+            <label style={ui.label}>Description</label>
+            <input style={ui.input} value={desc} onChange={(e) => setDesc(e.target.value)} />
 
-            <div style={{ height: 8 }} />
-            <label>Emergency Address</label><br />
+            <label style={ui.label}>Emergency Address</label>
             <input
+              style={ui.input}
               value={address}
               onChange={(e) => setAddress(e.target.value)}
-              style={{ width: "100%" }}
-              placeholder="e.g., 147 Cambridge Street, Syracuse NY"
+              placeholder="e.g., 750 E Adams St, Syracuse NY"
             />
 
-            <div style={{ height: 12 }} />
-            <button onClick={createEmergency} disabled={geoLoading}>
+            <button style={ui.btnPrimary} onClick={createEmergency} disabled={geoLoading}>
               {geoLoading ? "Locating address..." : "Submit Emergency"}
             </button>
-          </>
+
+            <SafetyPanel type={type} />
+          </div>
         )}
 
         {/* Lists */}
         {isResponder && mode === "RESPONDER" && (
-          <>
-            <h3 style={{ marginTop: 16 }}>Assigned Emergencies</h3>
+          <div style={ui.card}>
+            <div style={ui.sectionTitle}>Assigned Emergencies</div>
             {assigned.length === 0 ? (
-              <div style={{ opacity: 0.8 }}>No assigned emergencies</div>
+              <div style={{ opacity: 0.75, marginTop: 8 }}>No assigned emergencies</div>
             ) : (
               assigned.map((e) => (
                 <div
                   key={e.id}
-                  style={{ padding: "10px 0", borderBottom: "1px solid #333", cursor: "pointer" }}
+                  style={{
+                    ...ui.listItem,
+                    borderColor: selectedEmergency?.id === e.id ? "black" : "rgba(0,0,0,0.10)"
+                  }}
                   onClick={() => setSelectedEmergency(e)}
                 >
-                  <div><b>{e.type}</b> — {e.status}</div>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>{e.address || "—"}</div>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>{formatEta(e)}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div><b>{e.type}</b></div>
+                    <StatusBadge status={e.status} />
+                  </div>
+                  <div style={ui.small}>{e.address || "—"}</div>
+                  <div style={ui.small}>{formatEta(e)}</div>
                 </div>
               ))
             )}
-            <button style={{ marginTop: 10 }} onClick={loadAssigned}>Refresh</button>
-          </>
+            <button style={ui.btnOutline} onClick={loadAssigned}>Refresh</button>
+          </div>
         )}
 
         {isResponder && mode === "DISPATCH" && (
-          <>
-            <h3 style={{ marginTop: 16 }}>Dispatch Overview</h3>
-            <div style={{ fontSize: 12, opacity: 0.85 }}>
-              Stations: {stations.length} • Active emergencies: {dispatchEmergencies.length}
+          <div style={ui.card}>
+            <div style={ui.sectionTitle}>Dispatch Overview</div>
+            <div style={ui.small}>Stations: {stations.length} • Active: {dispatchEmergencies.length}</div>
+
+            <div style={{ marginTop: 10 }}>
+              {dispatchEmergencies.length === 0 ? (
+                <div style={{ opacity: 0.75 }}>No active emergencies</div>
+              ) : (
+                dispatchEmergencies.map((e) => (
+                  <div
+                    key={e.id}
+                    style={{
+                      ...ui.listItem,
+                      borderColor: selectedEmergency?.id === e.id ? "black" : "rgba(0,0,0,0.10)"
+                    }}
+                    onClick={() => setSelectedEmergency(e)}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <div><b>{e.type}</b></div>
+                      <StatusBadge status={e.status} />
+                    </div>
+                    <div style={ui.small}>{e.address || "—"}</div>
+                  </div>
+                ))
+              )}
             </div>
 
-            <h4 style={{ marginTop: 12 }}>Active Emergencies</h4>
-            {dispatchEmergencies.length === 0 ? (
-              <div style={{ opacity: 0.8 }}>No active emergencies</div>
-            ) : (
-              dispatchEmergencies.map((e) => (
-                <div
-                  key={e.id}
-                  style={{ padding: "10px 0", borderBottom: "1px solid #333", cursor: "pointer" }}
-                  onClick={() => setSelectedEmergency(e)}
-                >
-                  <div><b>{e.type}</b> — {e.status}</div>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>{e.address || "—"}</div>
-                </div>
-              ))
-            )}
-
-            <button style={{ marginTop: 10 }} onClick={loadStationsAndDispatch}>Refresh</button>
-          </>
+            <button style={ui.btnOutline} onClick={loadStationsAndDispatch}>Refresh</button>
+          </div>
         )}
 
         {isCitizen && (
-          <>
-            <h3 style={{ marginTop: 16 }}>My Emergencies</h3>
+          <div style={ui.card}>
+            <div style={ui.sectionTitle}>My Emergencies</div>
             {myEmergencies.length === 0 ? (
-              <div style={{ opacity: 0.8 }}>No emergencies yet</div>
+              <div style={{ opacity: 0.75, marginTop: 8 }}>No emergencies yet</div>
             ) : (
               myEmergencies.map((e) => (
                 <div
                   key={e.id}
-                  style={{ padding: "10px 0", borderBottom: "1px solid #333", cursor: "pointer" }}
+                  style={{
+                    ...ui.listItem,
+                    borderColor: selectedEmergency?.id === e.id ? "black" : "rgba(0,0,0,0.10)"
+                  }}
                   onClick={() => setSelectedEmergency(e)}
                 >
-                  <div><b>{e.type}</b> — {e.status}</div>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>{e.address || "—"}</div>
-                  <div style={{ fontSize: 12, opacity: 0.85 }}>{formatEta(e)}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                    <div><b>{e.type}</b></div>
+                    <StatusBadge status={e.status} />
+                  </div>
+                  <div style={ui.small}>{e.address || "—"}</div>
+                  <div style={ui.small}>{formatEta(e)}</div>
+
+                  {ACTIVE_STATUSES.includes(e.status) && (
+                    <div style={{ marginTop: 10 }}>
+                      <button
+                        style={ui.btnDanger}
+                        onClick={(ev) => { ev.stopPropagation(); cancelEmergency(e.id); }}
+                      >
+                        Cancel request
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))
             )}
-            <button style={{ marginTop: 10 }} onClick={loadMine}>Refresh</button>
-          </>
+            <button style={ui.btnOutline} onClick={loadMine}>Refresh</button>
+          </div>
         )}
 
-        {/* Action buttons for selected emergency */}
+        {/* Selected panel (actions + tracker) */}
         {selectedEmergency && (
-          <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #333" }}>
-            <div><b>Selected:</b> {selectedEmergency.type} — {selectedEmergency.status}</div>
-            <div style={{ fontSize: 12, opacity: 0.85 }}>{selectedEmergency.address || ""}</div>
-
-            {isCitizen && (
-              <div style={{ marginTop: 10 }}>
-                <button
-                  disabled={!canCitizenCancel}
-                  onClick={() => cancelEmergency(selectedEmergency.id)}
-                >
-                  Cancel Request
-                </button>
-                {!canCitizenCancel && (
-                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                    You can cancel only when status is PENDING or ASSIGNED.
-                  </div>
-                )}
+          <div style={ui.card}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+              <div>
+                <div style={{ fontWeight: 800 }}>{selectedEmergency.type}</div>
+                <div style={ui.small}>{selectedEmergency.address || "—"}</div>
               </div>
+              <StatusBadge status={selectedEmergency.status} />
+            </div>
+
+            <StatusTracker status={selectedEmergency.status} />
+
+            {/* Citizen actions */}
+            {isCitizen && canCancel(selectedEmergency) && (
+              <button
+                style={{ ...ui.btnDanger, marginTop: 12 }}
+                onClick={() => cancelEmergency(selectedEmergency.id)}
+              >
+                Cancel request
+              </button>
             )}
 
-            {isResponder && (
-              <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button disabled={!canResponderUpdate} onClick={() => updateStatus(selectedEmergency.id, "EN_ROUTE")}>
-                  EN_ROUTE
-                </button>
-                <button disabled={!canResponderUpdate} onClick={() => updateStatus(selectedEmergency.id, "ON_SCENE")}>
-                  ON_SCENE
-                </button>
-                <button disabled={!canResponderUpdate} onClick={() => updateStatus(selectedEmergency.id, "COMPLETED")}>
-                  COMPLETED
-                </button>
-              </div>
+            {/* Responder actions */}
+            {isResponder && !FINAL_STATUSES.includes(selectedEmergency.status) && selectedEmergency.assigned_responder_id === user.id && (
+              <>
+                <div style={{ marginTop: 12, ...ui.sectionTitle }}>Responder actions</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    style={ui.btnOutline}
+                    onClick={() => updateEmergencyStatus(selectedEmergency.id, "EN_ROUTE")}
+                  >
+                    Mark EN_ROUTE
+                  </button>
+                  <button
+                    style={ui.btnOutline}
+                    onClick={() => updateEmergencyStatus(selectedEmergency.id, "ON_SCENE")}
+                  >
+                    Mark ON_SCENE
+                  </button>
+                  <button
+                    style={ui.btnPrimary}
+                    onClick={() => updateEmergencyStatus(selectedEmergency.id, "COMPLETED")}
+                  >
+                    Complete
+                  </button>
+                </div>
+              </>
             )}
+
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+              Click route on map by selecting an emergency.
+            </div>
           </div>
         )}
       </div>
@@ -410,14 +608,110 @@ export default function Dashboard({ token, user, onLogout }) {
             ))}
 
           {/* Selected route */}
-          {routeLatLngs && (
-            <>
-              <Polyline positions={routeLatLngs} />
-              <FitBounds latlngs={routeLatLngs} />
-            </>
+          {selectedEmergency?.route_geojson && (
+            (() => {
+              const pts = geojsonToLatLngs(selectedEmergency.route_geojson);
+              if (pts.length < 2) return null;
+              return (
+                <>
+                  <Polyline positions={pts} />
+                  <FitBounds latlngs={pts} />
+                </>
+              );
+            })()
           )}
         </MapContainer>
       </div>
     </div>
   );
 }
+
+const ui = {
+  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 },
+  card: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(0,0,0,0.10)",
+    background: "rgba(0,0,0,0.02)"
+  },
+  sectionTitle: { fontWeight: 800, fontSize: 13, opacity: 0.9 },
+  label: { display: "block", marginTop: 10, marginBottom: 6, fontSize: 12, opacity: 0.8 },
+  input: {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(0,0,0,0.14)",
+    outline: "none"
+  },
+  btnPrimary: {
+    marginTop: 10,
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "none",
+    cursor: "pointer",
+    background: "black",
+    color: "white",
+    fontWeight: 700
+  },
+  btnOutline: {
+    marginTop: 10,
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(0,0,0,0.18)",
+    background: "white",
+    cursor: "pointer",
+    fontWeight: 700
+  },
+  btnDanger: {
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,0,0,0.30)",
+    background: "rgba(255,0,0,0.08)",
+    cursor: "pointer",
+    fontWeight: 800
+  },
+  listItem: {
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(0,0,0,0.10)",
+    background: "white",
+    marginTop: 10
+  },
+  small: { fontSize: 12, opacity: 0.75, marginTop: 4 },
+  badge: {
+    fontSize: 11,
+    padding: "5px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(0,0,0,0.12)",
+    background: "rgba(0,0,0,0.05)",
+    fontWeight: 800,
+    whiteSpace: "nowrap"
+  },
+  toast: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 12,
+    border: "1px solid rgba(0,0,0,0.12)",
+    background: "white",
+    fontSize: 13
+  },
+  panel: {
+    marginTop: 14,
+    padding: 12,
+    borderRadius: 12,
+    border: "1px solid rgba(0,0,0,0.12)",
+    background: "white"
+  },
+  panelTitle: { fontWeight: 900, fontSize: 14 },
+  panelSub: { marginTop: 4, fontSize: 12, opacity: 0.75 },
+  row: { display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 13 },
+  phoneLink: { textDecoration: "none", fontWeight: 900 },
+  list: { margin: "6px 0 0 18px", padding: 0, fontSize: 13, lineHeight: 1.35 },
+
+  trackerRow: { display: "flex", flexWrap: "wrap", gap: 10, marginTop: 8, alignItems: "center" },
+  trackerItem: { position: "relative", display: "flex", alignItems: "center", gap: 6 },
+  dot: { width: 10, height: 10, borderRadius: 999 },
+  line: { width: 26, height: 2, borderRadius: 2 }
+};

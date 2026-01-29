@@ -5,7 +5,10 @@ const { auth } = require("../middleware/auth");
 const { allowUserTypes } = require("../middleware/role");
 
 const router = express.Router();
+
 const VALID_TYPES = ["AMBULANCE", "POLICE", "FIRE"];
+const ACTIVE_STATUSES = ["PENDING", "ASSIGNED", "EN_ROUTE", "ON_SCENE"];
+const FINAL_STATUSES = ["COMPLETED", "CANCELLED"];
 
 // Haversine distance in meters
 function haversineMeters(lat1, lng1, lat2, lng2) {
@@ -19,7 +22,7 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// OSRM route (public endpoint)
+// OSRM route (free public endpoint)
 async function getOsrmRoute(stLat, stLng, emLat, emLng) {
   const url = `https://router.project-osrm.org/route/v1/driving/${stLng},${stLat};${emLng},${emLat}?overview=full&geometries=geojson`;
   const r = await fetch(url);
@@ -28,7 +31,7 @@ async function getOsrmRoute(stLat, stLng, emLat, emLng) {
   const route = data.routes?.[0];
   if (!route) throw new Error("OSRM returned no route");
   return {
-    geometry: route.geometry, // GeoJSON LineString
+    geometry: route.geometry,
     duration: Math.round(route.duration),
     distance: Math.round(route.distance)
   };
@@ -58,8 +61,8 @@ async function pickNearestStation(type, emLat, emLng) {
 }
 
 /**
- * Citizen creates emergency -> assigns nearest AVAILABLE station (matching type)
- * Stores route_geojson + ETA + distance.
+ * POST /emergencies
+ * Citizen creates emergency -> assign nearest available station -> store route
  */
 router.post("/", auth, allowUserTypes("CITIZEN"), async (req, res) => {
   const { type, description, location } = req.body;
@@ -107,14 +110,12 @@ router.post("/", auth, allowUserTypes("CITIZEN"), async (req, res) => {
       etaSeconds = route.duration;
       distanceMeters = route.distance;
 
-      // mark station busy
       await client.query(`UPDATE responders SET status='BUSY' WHERE user_id=$1`, [assignedResponderId]);
     }
 
     await client.query(
       `INSERT INTO emergencies
-       (id, created_by, type, description, lat, lng, address, status,
-        assigned_responder_id, route_geojson, eta_seconds, distance_meters)
+       (id, created_by, type, description, lat, lng, address, status, assigned_responder_id, route_geojson, eta_seconds, distance_meters)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         emergencyId,
@@ -138,11 +139,11 @@ router.post("/", auth, allowUserTypes("CITIZEN"), async (req, res) => {
       id: emergencyId,
       created_by: req.user.id,
       type,
-      status,
       description: description || "",
-      address,
       lat: emLat,
       lng: emLng,
+      address,
+      status,
       assigned_responder_id: assignedResponderId,
       route_geojson: routeGeojson,
       eta_seconds: etaSeconds,
@@ -158,27 +159,7 @@ router.post("/", auth, allowUserTypes("CITIZEN"), async (req, res) => {
 });
 
 /**
- * Station (Responder) views assigned emergencies
- */
-router.get("/assigned", auth, allowUserTypes("RESPONDER"), async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, created_by, type, description, lat, lng, address, status,
-              assigned_responder_id, route_geojson, eta_seconds, distance_meters, created_at
-       FROM emergencies
-       WHERE assigned_responder_id = $1
-       ORDER BY created_at DESC`,
-      [req.user.id]
-    );
-    return res.json({ emergencies: rows });
-  } catch (err) {
-    console.error("ASSIGNED ERROR:", err);
-    return res.status(500).json({ message: "Failed to load assigned emergencies", error: err.message });
-  }
-});
-
-/**
- * Citizen views their emergencies
+ * GET /emergencies/mine (Citizen)
  */
 router.get("/mine", auth, allowUserTypes("CITIZEN"), async (req, res) => {
   try {
@@ -198,10 +179,94 @@ router.get("/mine", auth, allowUserTypes("CITIZEN"), async (req, res) => {
 });
 
 /**
- * ✅ Responder updates status:
+ * GET /emergencies/assigned (Responder station)
+ */
+router.get("/assigned", auth, allowUserTypes("RESPONDER"), async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, created_by, type, description, lat, lng, address, status,
+              assigned_responder_id, route_geojson, eta_seconds, distance_meters, created_at
+       FROM emergencies
+       WHERE assigned_responder_id = $1
+       ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+    return res.json({ emergencies: rows });
+  } catch (err) {
+    console.error("ASSIGNED ERROR:", err);
+    return res.status(500).json({ message: "Failed to load assigned emergencies", error: err.message });
+  }
+});
+
+/**
+ * PATCH /emergencies/:id/cancel  (Citizen)
+ * Cancels if emergency belongs to citizen and is not completed/cancelled.
+ * If it was assigned -> frees the station (AVAILABLE).
+ */
+router.patch("/:id/cancel", auth, allowUserTypes("CITIZEN"), async (req, res) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const { rows } = await client.query(
+      `SELECT id, created_by, status, assigned_responder_id
+       FROM emergencies
+       WHERE id=$1
+       FOR UPDATE`,
+      [id]
+    );
+
+    if (!rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Emergency not found" });
+    }
+
+    const e = rows[0];
+
+    if (e.created_by !== req.user.id) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ message: "Not your emergency" });
+    }
+
+    if (FINAL_STATUSES.includes(e.status)) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ message: `Cannot cancel. Status is ${e.status}` });
+    }
+
+    const upd = await client.query(
+      `UPDATE emergencies
+       SET status='CANCELLED'
+       WHERE id=$1
+       RETURNING id, created_by, type, description, lat, lng, address, status,
+                 assigned_responder_id, route_geojson, eta_seconds, distance_meters, created_at`,
+      [id]
+    );
+
+    // free station if assigned
+    if (e.assigned_responder_id) {
+      await client.query(
+        `UPDATE responders SET status='AVAILABLE' WHERE user_id=$1`,
+        [e.assigned_responder_id]
+      );
+    }
+
+    await client.query("COMMIT");
+    return res.json({ emergency: upd.rows[0] });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("CANCEL ERROR:", err);
+    return res.status(500).json({ message: "Failed to cancel emergency", error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * PATCH /emergencies/:id/status (Responder station)
  * Allowed: EN_ROUTE, ON_SCENE, COMPLETED
- * Only if this emergency is assigned to that responder.
- * If COMPLETED -> responder becomes AVAILABLE.
+ * Only assigned station can update. COMPLETED frees station.
  */
 router.patch("/:id/status", auth, allowUserTypes("RESPONDER"), async (req, res) => {
   const { id } = req.params;
@@ -216,8 +281,7 @@ router.patch("/:id/status", auth, allowUserTypes("RESPONDER"), async (req, res) 
   try {
     await client.query("BEGIN");
 
-    // lock emergency row
-    const eRes = await client.query(
+    const { rows } = await client.query(
       `SELECT id, status, assigned_responder_id
        FROM emergencies
        WHERE id=$1
@@ -225,22 +289,21 @@ router.patch("/:id/status", auth, allowUserTypes("RESPONDER"), async (req, res) 
       [id]
     );
 
-    if (!eRes.rows.length) {
+    if (!rows.length) {
       await client.query("ROLLBACK");
       return res.status(404).json({ message: "Emergency not found" });
     }
 
-    const e = eRes.rows[0];
+    const e = rows[0];
 
     if (e.assigned_responder_id !== req.user.id) {
       await client.query("ROLLBACK");
-      return res.status(403).json({ message: "Not your assigned emergency" });
+      return res.status(403).json({ message: "Not assigned to you" });
     }
 
-    // don't allow updates if already cancelled/completed
-    if (["CANCELLED", "COMPLETED"].includes(e.status)) {
+    if (FINAL_STATUSES.includes(e.status)) {
       await client.query("ROLLBACK");
-      return res.status(400).json({ message: `Cannot update. Current status is ${e.status}` });
+      return res.status(400).json({ message: `Cannot update. Status is ${e.status}` });
     }
 
     const upd = await client.query(
@@ -260,80 +323,8 @@ router.patch("/:id/status", auth, allowUserTypes("RESPONDER"), async (req, res) 
     return res.json({ emergency: upd.rows[0] });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("RESPONDER STATUS ERROR:", err);
+    console.error("STATUS UPDATE ERROR:", err);
     return res.status(500).json({ message: "Failed to update status", error: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-/**
- * ✅ Citizen cancels their own emergency:
- * Allowed only if emergency.created_by === citizen
- * Allowed when status is PENDING or ASSIGNED (or EN_ROUTE if you want; here we restrict to PENDING/ASSIGNED)
- * If it was ASSIGNED, we free the responder (AVAILABLE).
- */
-router.patch("/:id/cancel", auth, allowUserTypes("CITIZEN"), async (req, res) => {
-  const { id } = req.params;
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    const eRes = await client.query(
-      `SELECT id, created_by, status, assigned_responder_id
-       FROM emergencies
-       WHERE id=$1
-       FOR UPDATE`,
-      [id]
-    );
-
-    if (!eRes.rows.length) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ message: "Emergency not found" });
-    }
-
-    const e = eRes.rows[0];
-
-    if (e.created_by !== req.user.id) {
-      await client.query("ROLLBACK");
-      return res.status(403).json({ message: "You can only cancel your own emergency" });
-    }
-
-    if (["CANCELLED", "COMPLETED"].includes(e.status)) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: `Cannot cancel. Current status is ${e.status}` });
-    }
-
-    // allow cancel only in early stages (adjust if you want)
-    if (!["PENDING", "ASSIGNED"].includes(e.status)) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: `Cannot cancel at status ${e.status}` });
-    }
-
-    const upd = await client.query(
-      `UPDATE emergencies
-       SET status='CANCELLED'
-       WHERE id=$1
-       RETURNING id, created_by, type, description, lat, lng, address, status,
-                 assigned_responder_id, route_geojson, eta_seconds, distance_meters, created_at`,
-      [id]
-    );
-
-    // free responder if assigned
-    if (e.assigned_responder_id) {
-      await client.query(
-        `UPDATE responders SET status='AVAILABLE' WHERE user_id=$1`,
-        [e.assigned_responder_id]
-      );
-    }
-
-    await client.query("COMMIT");
-    return res.json({ emergency: upd.rows[0] });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("CANCEL ERROR:", err);
-    return res.status(500).json({ message: "Failed to cancel emergency", error: err.message });
   } finally {
     client.release();
   }
